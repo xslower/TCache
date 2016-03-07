@@ -1,0 +1,216 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	// `errors`
+	"io"
+	"io/ioutil"
+	"net/http"
+	"strconv"
+	"testing"
+)
+
+var (
+	host = `http://127.0.0.1:6789/`
+)
+
+func parseResult(r io.Reader, result interface{}) error {
+	if result == nil {
+		return nil
+	}
+	var body, err = ioutil.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(body, result)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func httpPost(url string, body interface{}, result interface{}) error {
+	var byte_body []byte
+	if val, ok := body.(string); ok {
+		byte_body = []byte(val)
+	} else {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		byte_body = b
+	}
+	var reader = bytes.NewReader(byte_body)
+	var resp, err = http.Post(url, `application/json;charset=utf-8`, reader)
+	if err != nil {
+		return err
+	}
+	err = parseResult(resp.Body, result)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func httpGet(url string, result interface{}) error {
+	var resp, err = http.Get(url)
+	if err != nil {
+		return err
+	}
+	err = parseResult(resp.Body, result)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+type RetInt struct {
+	Result  int
+	Err_no  int
+	Err_msg string
+}
+
+type RetSlc struct {
+	Result  []int64
+	Err_no  int
+	Err_msg string
+}
+
+func TestSwitch(t *testing.T) {
+	echo(`Switch:`)
+	var url = host + `switch?db=5`
+	var ri = &RetInt{}
+	var err = httpGet(url, ri)
+	throw(err)
+	if ri.Result != 5 {
+		t.Error(`failed switch`)
+	}
+	echo(*ri)
+
+}
+
+func TestMSetGet(t *testing.T) {
+	echo(`SetGet:`)
+	var url = host + `mset`
+	var post = `{"12345":54321,"234567":987654}`
+	var ri = &RetInt{}
+	var err = httpPost(url, post, ri)
+	throw(err, `set`)
+	if ri.Result != 2 {
+		t.Error(`push error`)
+	}
+	url = host + `mget`
+	post = `[12345,234567]`
+	var rslc = &RetSlc{}
+	err = httpPost(url, post, rslc)
+	throw(err, `get`)
+	if rslc.Result[0] != 54321 || rslc.Result[1] != 987654 {
+		t.Error(`failed set get`)
+	}
+	echo(*rslc)
+}
+
+func PushPop(t *testing.T, c string) {
+	var push, pop = `push`, `pop`
+	if c != `` {
+		push = c + push
+		pop = c + pop
+	}
+	var url = host + push
+	for i := 9; i >= 2; i-- {
+		var post = map[string]int{"123": i, "234": i + 10}
+		var ri = &RetInt{}
+		var err = httpPost(url, post, ri)
+		throw(err, `push`)
+		if ri.Result != 2 {
+			t.Error(push + `error`)
+		}
+	}
+	url = host + pop
+	var post = &ApiParam{Key: 123, Val: 3}
+	var rslc = &RetSlc{}
+	var err = httpPost(url, post, rslc)
+	throw(err, `pop`)
+	if len(rslc.Result) != 3 {
+		t.Error(pop + `error`)
+	}
+	echo(*rslc)
+}
+
+func TestPushPop(t *testing.T) {
+	echo(`IPushPop:`)
+	PushPop(t, ``)
+}
+
+func TestSPushPop(t *testing.T) {
+	echo(`LPP:`)
+	PushPop(t, `s`)
+}
+
+type RetMark struct {
+	Result  []Unit
+	Err_no  int
+	Err_msg string
+}
+
+func TestZPushPop(t *testing.T) {
+	echo(`ZPP:`)
+	for i := 10; i > 0; i-- {
+		var url = host
+		url += `zpush`
+		var v = int64(i + 1)
+		var s = float32(i)
+		var km1 = KeyMark{123, Unit{Val: v, Score: s}}
+		var km2 = KeyMark{234, Unit{Val: v + 10, Score: s + 10}}
+		var post = []KeyMark{km1, km2}
+		var ri = &RetInt{}
+		var err = httpPost(url, post, ri)
+		throw(err, `push`)
+		if ri.Result != 2 {
+			t.Error(`zpush error`)
+		}
+	}
+	var url = host + `zpop`
+	var post = &ApiParam{Key: 123, Val: 5}
+	var rm = &RetMark{}
+	var err = httpPost(url, post, rm)
+	throw(err, `pop`)
+	echo(rm)
+}
+
+func BenchmarkInt(b *testing.B) {
+	return
+	// b.SetParallelism(10)
+	var url = host + `mset`
+	for j := 1; j < 100; j++ {
+		var post = map[string]int{}
+		for i := 1; i < 10000; i++ {
+			var str = strconv.Itoa(i * j)
+			post[str] = i
+
+		}
+		var ri = &RetInt{}
+		var err = httpPost(url, post, ri)
+		throw(err)
+		echo(ri)
+	}
+}
+
+func BenchmarkList(b *testing.B) {
+	var url = host + `push`
+	for i := 1; i < 1000; i++ {
+		var post = map[string]int{}
+		for j := 1; j < 1000; j++ {
+			var str = strconv.Itoa(j)
+			post[str] = i * j
+
+		}
+		var ri = &RetInt{}
+		var err = httpPost(url, post, ri)
+		throw(err)
+		echo(ri)
+	}
+}
+
+//bottom

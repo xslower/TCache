@@ -1,0 +1,175 @@
+package main
+
+import (
+	"sync"
+)
+
+/**
+ * Keys []uint32保存key，同时也是LRU列表，用的多在后面，清除时从前面清。
+ * 为了减少移动内存的次数，增加了一个数组的洞管理holes器；
+ * 1.每次visit命中把该数据移动到它后面最近的洞中，
+ * 2.删除则直接挖洞
+ * 3.插入则插到最后的洞中，如果没有洞则插到最后
+ * 4.在洞容器满了之后先通过移动内存把洞填上(清空洞容器)再操作
+ */
+func NewIntTable(m *Memory) *IntTable {
+	var it = &IntTable{Mem: m}
+	it.Keys = make([]uint32, LCL_MEM_STEP)
+	it.Vals = make([]int64, LCL_MEM_STEP)
+	it.holes = *NewHole()
+	return it
+}
+
+type IntTable struct {
+	Keys  []uint32
+	Vals  []int64
+	Mem   *Memory
+	holes Hole
+	mtx   sync.Mutex
+	tail  uint32
+	Visit uint16 //访问的次数，用来调节内存的
+}
+
+func (this *IntTable) enlarge(count uint32) {
+	var tk = this.Keys
+	var tv = this.Vals
+	this.Keys = make([]uint32, len(tk)+int(count))
+	this.Vals = make([]int64, len(tv)+int(count))
+	copy(this.Keys, tk[:this.tail])
+	copy(this.Vals, tv[:this.tail])
+}
+
+func (this *IntTable) trimHole() uint32 {
+	var hls = this.holes.ClearAll()
+	var ln = uint32(len(hls))
+	var dis uint32 = 1
+	var head, tail uint32
+	for i := uint32(0); i < ln; i++ {
+		head = hls[i] + 1
+		if i+1 == ln {
+			tail = this.tail
+		} else {
+			tail = hls[i+1]
+		}
+		copy(this.Keys[head-dis:tail], this.Keys[head:tail])
+		copy(this.Vals[head-dis:tail], this.Vals[head:tail])
+		dis++
+	}
+	return uint32(ln)
+}
+
+func (this *IntTable) moveToHead(start uint32) {
+	copy(this.Keys, this.Keys[start:this.tail])
+	copy(this.Vals, this.Vals[start:this.tail])
+	this.tail -= start
+	this.holes.Move(start)
+}
+
+func (this *IntTable) askForMem(count uint32) {
+	var must = false
+	if len(this.Keys) < int(count) {
+		must = true
+	}
+	//每个slot占用3个单位的内存，所以这个以3单元为单位
+	if this.Mem.AskFor(int(count*3), must) {
+		this.enlarge(count)
+	} else { //申请不到则删除前面的key
+		this.moveToHead(count)
+
+	}
+}
+
+func (this *IntTable) leftSpace() uint32 {
+	var ret = uint32(len(this.Keys)) + this.holes.Len() - this.tail
+	return ret
+}
+
+func (this *IntTable) search(key uint32) uint32 {
+	//这里i必须是int型，uint32不可能<0，所以无限循环
+	// for i := int(this.tail) - 1; i >= 0; i-- {
+	// 	if this.Keys[i] == key {
+	// 		return uint32(i)
+	// 	}
+	// }
+	return this.tail
+}
+
+func (this *IntTable) visit(pos uint32) {
+	this.Visit++
+	//数量太少，或已经是最常使用的，无需再操作
+	if this.tail < RECENT_NUM || this.tail < pos+RECENT_NUM {
+		return
+	}
+	if this.holes.IsFull() {
+		this.trimHole()
+	}
+	var key = this.Keys[pos]
+	this.Keys[pos] = 0
+	var val = this.Vals[pos]
+	var newPos = this.holes.Replace(pos)
+	if newPos == pos {
+		newPos = this.tail
+		this.tail++
+	}
+	this.Keys[newPos] = key
+	this.Vals[newPos] = val
+}
+
+func (this *IntTable) Get(key uint32) int64 {
+	this.mtx.Lock()
+	var ret int64 = 0
+	var pos = this.search(key)
+	if pos < this.tail {
+		ret = this.Vals[pos]
+		this.visit(pos)
+	}
+	this.mtx.Unlock()
+	return ret
+}
+
+func (this *IntTable) Set(key uint32, val int64) {
+	var step = LCL_MEM_STEP * 2
+	this.mtx.Lock()
+	if this.leftSpace() < 1 {
+		this.askForMem(step)
+	}
+	var pos = this.search(key)
+	if pos == this.tail {
+		var newPos = this.holes.Pop(this.tail)
+		if newPos == this.tail {
+			this.tail++
+		}
+		this.Keys[newPos] = key
+		this.Vals[newPos] = val
+	} else { //有这个key则直接赋值即可
+		this.Vals[pos] = val
+	}
+	this.mtx.Unlock()
+}
+
+func (this *IntTable) Del(key uint32) {
+	this.mtx.Lock()
+	var pos = this.search(key)
+	if pos < this.tail {
+		if this.holes.IsFull() {
+			this.trimHole()
+		}
+		this.holes.Set(pos)
+		this.Keys[pos] = 0
+	}
+	this.mtx.Unlock()
+}
+
+//num可以为负，所以不需要decrease
+func (this *IntTable) Increase(key uint32, num int64) int64 {
+	this.mtx.Lock()
+	var pos = this.search(key)
+	var val int64
+	if pos < this.tail {
+		val = this.Vals[pos]
+		val += num
+		this.Vals[pos] = val
+	}
+	this.mtx.Unlock()
+	return val
+}

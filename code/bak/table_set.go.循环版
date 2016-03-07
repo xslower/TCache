@@ -1,0 +1,173 @@
+
+func NewSetTable(m *Memory) *SetTable {
+	var st = &SetTable{Mem: m}
+	st.Keys = make([]uint32, MIN_LEN)
+	st.Vals = make([]*SortedSet, MIN_LEN)
+	st.lru = *NewLRU()
+	return st
+}
+
+type SetTable struct {
+	Keys   []uint32
+	Vals   []*SortedSet
+	Mem    *Memory
+	lru    LRU
+	mtx    sync.Mutex
+	left   uint32
+	lclMem uint32
+	Visit  uint16
+}
+
+
+// func (this *SetTable) enlarge(count int) {
+// 	var tk = this.Keys
+// 	var tv = this.Vals
+// 	this.Keys = make([]uint32, len(tk)+int(count))
+// 	this.Vals = make([]*SortedSet, len(tv)+int(count))
+// 	copy(this.Keys, tk[:this.tail])
+// 	copy(this.Vals, tv[:this.tail])
+// }
+
+// /**
+//  * 根据holes中记录的洞的位置，通过循环移动内存把洞补上
+//  */
+// func (this *SetTable) trimHole() uint32 {
+// 	var hls = this.holes.ClearAll()
+// 	var ln = uint32(len(hls))
+// 	var dis uint32 = 1
+// 	var head, tail uint32
+// 	for i := uint32(0); i < ln; i++ {
+// 		head = hls[i] + 1
+// 		if i+1 == ln {
+// 			tail = this.tail
+// 		} else {
+// 			tail = hls[i+1]
+// 		}
+// 		copy(this.Keys[head-dis:tail], this.Keys[head:tail])
+// 		copy(this.Vals[head-dis:tail], this.Vals[head:tail])
+// 		dis++
+// 	}
+// 	return uint32(ln)
+// }
+
+// func (this *SetTable) moveToHead(start uint32) {
+// 	copy(this.Keys, this.Keys[start:this.tail])
+// 	copy(this.Vals, this.Vals[start:this.tail])
+// 	this.tail -= start
+// 	//移动内存位置后，洞的位置也会偏移，需要修正
+// 	this.holes.Move(start)
+// }
+
+// //删除列表前count个元素，通过总Cap来计算总共的释放的内存单元
+// func (this *SetTable) freeMem(count uint32) (total uint32) {
+// 	for i := uint32(0); i < count; i++ {
+// 		total += this.Vals[i].Cap()
+// 	}
+// 	this.moveToHead(count)
+// 	return
+// }
+
+// func (this *SetTable) askForMem(count uint32) {
+// 	/**
+// 	 *这里set以INTS_STEP单位增加和减少大小，每个set的unit占4个单位，table的slot占用3个单位, 所以这里以2为单位
+// 	 */
+// 	var size = count * INTS_STEP * 2
+// 	if this.Mem.AskFor(int(size * 2)) {
+// 		this.lclMem += size
+// 	} else { //申请不到内存则删除前面的key空出空间
+// 		var total = this.freeMem(count)
+// 		this.lclMem += total
+// 	}
+// }
+
+// func (this *SetTable) leftSpace() uint32 {
+// 	var ret = uint32(len(this.Keys)) + this.holes.Len() - this.tail
+// 	return ret
+// }
+
+// func (this *SetTable) search(key uint32) uint32 {
+// 	for i := int(this.tail) - 1; i >= 0; i-- {
+// 		if this.Keys[i] == key {
+// 			return uint32(i)
+// 		}
+// 	}
+// 	return this.tail
+// }
+
+// func (this *SetTable) visit(pos uint32) {
+// 	this.Visit++
+// 	if this.tail < RECENT_NUM || this.tail < pos+RECENT_NUM {
+// 		return
+// 	}
+// 	if this.holes.IsFull() {
+// 		this.trimHole()
+// 	}
+// 	var key = this.Keys[pos]
+// 	this.Keys[pos] = 0
+// 	var val = this.Vals[pos]
+// 	var newPos = this.holes.Replace(pos)
+// 	if newPos == pos {
+// 		newPos = this.tail
+// 		this.tail++
+// 	}
+// 	this.Keys[newPos] = key
+// 	this.Vals[newPos] = val
+// }
+
+// func (this *SetTable) Get(key uint32) *SortedSet {
+// 	this.mtx.Lock()
+// 	var ret *SortedSet = nil
+// 	var pos = this.search(key)
+// 	if pos < this.tail {
+// 		ret = this.Vals[pos]
+// 		this.visit(pos)
+// 	}
+// 	this.mtx.Unlock()
+// 	return ret
+// }
+
+// func (this *SetTable) Set(key uint32, val Unit) {
+// 	var step = LCL_MEM_STEP
+// 	this.mtx.Lock()
+// 	if this.lclMem < INTS_STEP {
+// 		this.askForMem(step)
+// 	}
+// 	var set *SortedSet = nil
+// 	var pos = this.search(key)
+// 	if pos == this.tail {
+// 		var newPos = this.holes.Pop(this.tail)
+// 		if newPos == this.tail {
+// 			this.tail++
+// 			if this.leftSpace() < 1 {
+// 				this.enlarge(step)
+// 				this.lclMem -= step * 3 / 2
+// 			}
+// 		}
+// 		set = NewSortedSet()
+// 		this.Keys[newPos] = key
+// 		this.Vals[newPos] = set
+// 		this.lclMem -= INTS_STEP
+// 	} else { //有这个key则直接赋值即可
+// 		set = this.Vals[pos]
+// 		if set.IsFull() {
+// 			if set.Enlarge(INTS_STEP) {
+// 				this.lclMem -= INTS_STEP
+// 			}
+// 		}
+// 	}
+// 	set.Push(val)
+// 	this.mtx.Unlock()
+// }
+
+// func (this *SetTable) Del(key uint32) {
+// 	this.mtx.Lock()
+// 	var pos = this.search(key)
+// 	if pos < this.tail {
+// 		if this.holes.IsFull() {
+// 			this.trimHole()
+// 		}
+// 		this.holes.Set(pos)
+// 		this.Keys[pos] = 0
+// 	}
+// 	this.mtx.Unlock()
+// }
